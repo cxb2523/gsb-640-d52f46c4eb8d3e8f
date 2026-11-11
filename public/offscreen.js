@@ -422,6 +422,37 @@ setInterval(() => {
 // ---------------------------------------------------------------------------
 // Message routing
 
+// ---------------------------------------------------------------------------
+// Limiter audit — read-only snapshot of the shared output limiter's configuration.
+// Never throws and never touches the audio graph; answers even while the engine is
+// still initializing or has failed, so diagnostics can always ask.
+
+function buildLimiterAudit() {
+  if (engineFailure) {
+    return { type: 'limiterAudit', auditable: false, reason: 'audio engine failed: ' + engineFailure };
+  }
+  if (!audioContext || !outputLimiter) {
+    return { type: 'limiterAudit', auditable: false, reason: 'audio engine not initialized yet' };
+  }
+  const audit = typeof globalThis !== 'undefined' ? globalThis.LimiterAudit : null;
+  if (!audit || typeof audit.describeLimiterConfig !== 'function') {
+    return { type: 'limiterAudit', auditable: false, reason: 'limiter audit module not loaded' };
+  }
+  // The worklet constructs LookaheadLimiter(sampleRate, 2) with default options — mirror that.
+  let outputPeak = null;
+  try {
+    outputPeak = readOutputPeak();
+  } catch (e) {
+    /* peak tap unavailable — the config snapshot is still valid */
+  }
+  return {
+    type: 'limiterAudit',
+    auditable: true,
+    config: audit.describeLimiterConfig(audioContext.sampleRate, 2, {}),
+    outputPeak
+  };
+}
+
 function reportEngineError(where, e) {
   const msg = (e && (e.message || e.name)) || String(e);
   console.error('[UmbraEQ offscreen] ' + where + ':', e);
@@ -479,6 +510,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         dlog('getFFT failed:', e && e.message);
         sendResponse({ fft: null, peak: 0 });
       });
+    return true;
+  }
+
+  if (message.type === 'auditLimiter') {
+    // Read-only; deliberately NOT gated on `ready` so a failed/hung engine still gets an answer.
+    sendResponse(buildLimiterAudit());
     return true;
   }
 
