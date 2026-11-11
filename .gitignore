@@ -1,0 +1,41 @@
+# Build output (the packaged .zip goes to GitHub Releases, not the repo)
+dist/
+
+# Tooling / dev
+node_modules/
+.playwright-mcp/
+*.log
+scratchpad/
+
+# Private/local notes — do not publish in repo or store package.
+# HANDOFF.md, STORE_LISTING.md and docs/AUDIT.md used to live here and now live in the private
+# umbra-internal repository — they describe internal development, not the shipped product.
+MONETIZATION.md
+Chat.md
+ENGINE_STUDY.md
+
+# Claude Code working files — local tooling, not project docs
+CLAUDE.md
+.claude/
+graphify-out/
+
+# Dev-only screenshots & scratch
+test/*.png
+*.tmp
+
+# Design exploration mockups (kept on disk for reference, not shipped)
+mockups/
+docs/redesign/
+
+# Local audit evidence, backups, downloaded references and private analytics
+.audit/
+
+# OS cruft
+Thumbs.db
+.DS_Store
+
+# Store package output
+release/
+
+# Store marketing assets (generated, for upload)
+store-assets/

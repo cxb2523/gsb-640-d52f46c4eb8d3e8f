@@ -1,0 +1,157 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Dark, muted, glass tokens (shadcn-style HSL variables). No neon. */
+:root {
+  --background: 228 16% 5%;
+  --foreground: 228 24% 94%;
+  --card: 228 15% 9%;
+  --card-foreground: 228 24% 94%;
+  --muted: 228 14% 13%;
+  --muted-foreground: 228 10% 60%;
+  --primary: 232 40% 67%;
+  --primary-foreground: 228 40% 7%;
+  --secondary: 228 14% 14%;
+  --secondary-foreground: 228 24% 94%;
+  --accent: 232 42% 72%;
+  --accent-foreground: 228 40% 7%;
+  --destructive: 350 45% 62%;
+  --destructive-foreground: 228 24% 96%;
+  --border: 228 12% 19%;
+  --input: 228 12% 19%;
+  --ring: 232 40% 67%;
+  --radius: 0.8rem;
+
+  /* Depth ring for cards/buttons — "shadows over borders" (dark mode = one white
+     ring; layered depth shadows are invisible on dark grounds). Pure white, not a
+     tinted neutral, so it never reads as dirt on the surface edge. */
+  --shadow-border: 0 0 0 1px oklch(1 0 0 / 0.08);
+  --shadow-border-hover: 0 0 0 1px oklch(1 0 0 / 0.13);
+
+  /* EQ graph colors — OKLCH (perceptually uniform). Accent trio (peak/shelf/viz)
+     is pinned to constant lightness across every theme (L 0.69 / 0.47) so no theme
+     reads brighter than another; only hue + chroma change. Hex ancestors kept in
+     git history. */
+  --g-screen: oklch(0.171 0.015 278.37);
+  --g-axis: oklch(0.303 0.022 274.02);
+  --g-peak: oklch(0.69 0.076 277.26);
+  --g-shelf: oklch(0.69 0.043 202.09);
+  --g-viz: oklch(0.47 0.051 277.01);
+  --g-grab: oklch(0.952 0.008 271.33);
+  --g-text: oklch(0.74 0.018 273.02);
+}
+
+/* Four muted themes (no neon). Eclipse = the :root defaults above. */
+body[data-theme='nocturne'] {
+  --primary: 213 40% 62%;
+  --accent: 213 40% 66%;
+  --ring: 213 40% 62%;
+  --g-peak: oklch(0.69 0.067 264.81);
+  --g-shelf: oklch(0.69 0.059 233.26);
+  --g-viz: oklch(0.47 0.06 262.71);
+}
+body[data-theme='aurora'] {
+  --primary: 152 30% 60%;
+  --accent: 152 30% 64%;
+  --ring: 152 30% 60%;
+  --g-peak: oklch(0.69 0.061 163.18);
+  --g-shelf: oklch(0.69 0.073 131.87);
+  --g-viz: oklch(0.47 0.044 165.75);
+}
+body[data-theme='solar'] {
+  --primary: 38 42% 59%;
+  --accent: 38 42% 63%;
+  --ring: 38 42% 59%;
+  --g-peak: oklch(0.69 0.082 78.49);
+  --g-shelf: oklch(0.69 0.075 41.43);
+  --g-viz: oklch(0.47 0.042 69.22);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply text-foreground;
+  }
+}
+
+html {
+  margin: 0;
+  /* Full-width dark ground so the "Full window" tab isn't the 620px app stuck in a corner. */
+  background: hsl(var(--background));
+}
+/* Popup geometry is independent of notices and the selected view. The full-window
+   editor is identified by app state, never by viewport height. */
+html:not(:has([data-layout='window'])),
+body:not(:has([data-layout='window'])) {
+  width: 620px;
+  max-width: 620px;
+  height: 580px;
+  overflow-x: hidden;
+}
+body {
+  margin: 0;
+  background: hsl(var(--background));
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+#root { height: 100%; }
+.eq-graph { width: 100%; height: auto; align-self: flex-start; }
+html:has([data-layout='window']) {
+  min-height: 100vh;
+  padding: 40px 24px;
+}
+body:has([data-layout='window']) {
+  width: min(960px, 100%);
+  margin: 0 auto;
+  border: 1px solid hsl(var(--border));
+  border-radius: 16px;
+  overflow: hidden;
+}
+[data-layout='window'] > main > section { padding: 24px; }
+[data-layout='window'] nav { margin-top: 12px; }
+@media (max-width: 640px) {
+  html:has([data-layout='window']) { padding: 12px; }
+  [data-layout='window'] > main > section { padding: 12px; }
+}
+
+/* Custom-color hue slider thumb (range input can't be themed with utilities). */
+.umbra-hue::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: #fff;
+  border: 2px solid rgba(0, 0, 0, 0.4);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  cursor: pointer;
+}
+.umbra-hue::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: #fff;
+  border: 2px solid rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+}
+
+/* Preserve the original compact interface; make keyboard focus explicit. */
+:where(button, a, input, [role='slider'], [role='option']):focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 3px;
+}
+button, a, input { -webkit-tap-highlight-color: transparent; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+@media (forced-colors: active) {
+  :focus-visible { outline-color: Highlight; }
+}

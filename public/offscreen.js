@@ -1,0 +1,505 @@
+// Audio engine — PER-TAB chains. Every captured tab gets its own
+//   MediaStreamSource(tab) -> preGain -> [11 biquad filters] -> postGain -> shared output bus
+// so two tabs can hold two different EQ curves at the same time (a film tab and a
+// music tab, each shaped independently).
+//
+// The offscreen document has no chrome.storage access and only applies resolved settings.
+// The service worker resolves startup; the popup resolves edits (rule -> global -> flat)
+// and pushes them through 'applySettings'. This script builds/holds per-tab chains
+// and reports status + FFT back to the popup. The service worker supplies resolved settings
+// with capture startup. A shared lookahead limiter bounds the mixed output of every tab.
+
+const NUM_FILTERS = 11;
+const DEFAULT_FREQUENCIES = [20, 40, 80, 160, 320, 640, 1280, 2560, 5120, 10240, 20480];
+const DEFAULT_Q = 0.7071; // Butterworth
+
+// Bump on every change so the popup can detect a STALE service worker / offscreen.
+const BUILD = '2.5.0';
+
+// --- Logging: ring buffer + console, so diagnostics can be exported later. ---
+const DEBUG = false; // flip to true only for local diagnostics
+const LOG = [];
+const _ts = () => new Date().toISOString().substr(11, 12);
+const _fmt = (x) => {
+  try {
+    return typeof x === 'object' ? JSON.stringify(x) : String(x);
+  } catch (e) {
+    return String(x);
+  }
+};
+function dlog(...a) {
+  LOG.push(_ts() + ' ' + a.map(_fmt).join(' '));
+  if (LOG.length > 400) LOG.shift();
+  if (DEBUG) console.log('[UmbraEQ offscreen]', ...a);
+}
+self.addEventListener('error', (e) => dlog('UNCAUGHT', e.message, e.filename + ':' + e.lineno));
+self.addEventListener('unhandledrejection', (e) => dlog('UNHANDLED_REJECTION', e.reason && (e.reason.message || e.reason)));
+
+let audioContext = null;
+let outputBus = null;
+let outputLimiter = null;
+let outputAnalyzers = [];
+let outputTimeBuf = null;
+let engineFailure = '';
+// tabId -> { stream, source, preGain, filters[11], postGain, analyzer,
+//            lastAnalyzerUse, host, tab, bands[11], gain, presetName }
+const streams = {};
+// tabId -> unique token for a getUserMedia in flight. A disconnect (or a newer capture for the same
+// tab) replaces/removes the token so startCapture stops the freshly-acquired stream instead of
+// orphaning it (the entry isn't in `streams` yet, so stopStream can't reach it).
+const pending = new Map();
+
+// ---------------------------------------------------------------------------
+// Clamps (keep the audio graph in sane ranges no matter what the UI sends)
+
+const clampFilterGain = (g) => Math.max(-30, Math.min(30, Number(g) || 0));
+const clampFrequency = (f) => Math.max(5, Math.min(22000, Number(f) || 5)); // ceiling ≥ band 11 (20480 Hz); lock-step with clampFreq in src/lib/audio.ts
+const clampQ = (q) => Math.max(0.2, Math.min(11, Number(q) || DEFAULT_Q));
+// <=0 / non-finite -> unity (1), matching clampMasterGain in src/lib/audio.ts; otherwise clamp to the
+// [0.0031622776601683794, 10] linear range (= [-50, +20] amplitude dB).
+const clampMasterGain = (g) => {
+  const n = Number(g);
+  return Number.isFinite(n) && n > 0 ? Math.max(0.0031622776601683794, Math.min(10, n)) : 1;
+};
+
+const typeOf = (i) => (i === 0 ? 'lowshelf' : i === NUM_FILTERS - 1 ? 'highshelf' : 'peaking');
+const flatBands = () => DEFAULT_FREQUENCIES.map((f) => ({ f, g: 0, q: DEFAULT_Q }));
+function hostOf(url) {
+  // Strip a leading www. so per-domain rules treat www.site and site as one.
+  try {
+    return (new URL(url).hostname || '').replace(/^www\./, '');
+  } catch (e) {
+    return '';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Engine bootstrap — just the context now; chains are built per captured tab.
+
+async function setupAudioNodes() {
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) throw new Error('AudioContext unavailable in offscreen document');
+  audioContext = new Ctx({ latencyHint: 'playback' });
+  await audioContext.suspend(); // resume only while something is captured
+  await setupOutputNodes();
+}
+
+async function setupOutputNodes() {
+  // Local modules only: extension CSP permits these URLs, and initialization must finish before
+  // any captured source is connected. Failure never falls back to an unprotected output.
+  await audioContext.audioWorklet.addModule(chrome.runtime.getURL('limiter-worklet.js'));
+  outputLimiter = new AudioWorkletNode(audioContext, 'umbra-output-limiter', {
+    numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2],
+    channelCount: 2, channelCountMode: 'explicit', channelInterpretation: 'speakers'
+  });
+  outputBus = audioContext.createGain();
+  outputBus.connect(outputLimiter);
+  outputLimiter.connect(audioContext.destination);
+  // AnalyserNode downmixes to mono. Split first or opposite-phase stereo could read as silence.
+  const splitter = audioContext.createChannelSplitter(2);
+  outputLimiter.connect(splitter);
+  outputAnalyzers = [0, 1].map((channel) => {
+    const analyzer = audioContext.createAnalyser();
+    analyzer.fftSize = 4096;
+    splitter.connect(analyzer, channel);
+    return analyzer;
+  });
+  outputTimeBuf = new Float32Array(4096);
+  outputLimiter.onprocessorerror = () => {
+    engineFailure = 'Audio processor stopped; reload the extension';
+    outputBus = null;
+    for (const id of Object.keys(streams)) disconnectTab(Number(id));
+    reportEngineError('output limiter', new Error(engineFailure));
+  };
+}
+
+function readOutputPeak() {
+  let peak = 0;
+  for (const analyzer of outputAnalyzers) {
+    analyzer.getFloatTimeDomainData(outputTimeBuf);
+    for (let i = 0; i < outputTimeBuf.length; i++) peak = Math.max(peak, Math.abs(outputTimeBuf[i]));
+  }
+  return Number.isFinite(peak) ? peak : 0;
+}
+
+// Build a fresh chain for one tab from a bands[] + master gain.
+// Static chain (wired once): a biquad at 0 dB is transparent, so we never bypass
+// filters at runtime — live disconnect/reconnect is a classic click source.
+function buildChain(entry, bands, gain) {
+  const pre = audioContext.createGain();
+  pre.gain.value = 1;
+  const post = audioContext.createGain();
+  post.gain.value = clampMasterGain(gain);
+
+  const filters = [];
+  let node = pre;
+  for (let i = 0; i < NUM_FILTERS; i++) {
+    const f = audioContext.createBiquadFilter();
+    f.type = typeOf(i);
+    const b = bands[i] || {};
+    f.frequency.value = clampFrequency(b.f ?? DEFAULT_FREQUENCIES[i]);
+    f.gain.value = clampFilterGain(b.g ?? 0);
+    f.Q.value = clampQ(b.q ?? DEFAULT_Q);
+    f.__t = { f: f.frequency.value, g: f.gain.value, q: f.Q.value };
+    filters.push(f);
+    node.connect(f);
+    node = f;
+  }
+  node.connect(post);
+  // Limit after summing all tabs: independent per-tab ceilings do not constrain their sum.
+  post.connect(outputBus);
+  post.__t = post.gain.value;
+
+  entry.preGain = pre;
+  entry.postGain = post;
+  entry.filters = filters;
+}
+
+// ---------------------------------------------------------------------------
+// Capture
+
+async function startCapture(streamId, tab, settings) {
+  // getUserMedia acquires the OS-level capture; without a live context we could never wire or
+  // stop it, so bail before acquiring rather than deref a null context afterwards.
+  if (!audioContext || !outputBus) {
+    reportEngineError('startCapture', new Error('audio engine not initialized'));
+    return;
+  }
+  let stream;
+  // A unique token per in-flight capture: a disconnect OR a newer capture for the same tab replaces
+  // it, so this one knows to stop the stream it just acquired instead of racing to a live chain.
+  const token = {};
+  pending.set(tab.id, token);
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: streamId } }
+    });
+  } catch (e) {
+    // Revocation of an obsolete request is expected after Stop/retry. Only the current request
+    // may put the UI into an error state; a replacement capture may already be playing.
+    if (pending.get(tab.id) !== token) return;
+    pending.delete(tab.id);
+    reportEngineError('getUserMedia for tab capture failed', e);
+    return;
+  }
+  // Superseded (disconnect, or a newer startCapture for this tab) while getUserMedia was awaiting —
+  // stop the stream we just acquired instead of capturing a tab the user disconnected/re-toggled.
+  if (pending.get(tab.id) !== token) {
+    stream.getTracks().forEach((t) => t.stop());
+    dlog('startCapture: superseded mid-await, dropped stream for tab', tab.id);
+    return;
+  }
+  pending.delete(tab.id);
+
+  try {
+    if (tab.id in streams) stopStream(tab.id); // re-capture replaces old stream
+    if (Object.keys(streams).length === 0) audioContext.resume().catch((e) => dlog('resume failed:', e && e.message));
+
+    const host = hostOf(tab.url);
+    // Resolved by the service worker, so shortcuts and closing the popup cannot start a saved
+    // profile as Flat. The fallback supports older senders only; current capture always supplies it.
+    const initial = Array.isArray(settings?.eqFilters) ? settings.eqFilters : [];
+    const bands = flatBands().map((fallback, i) => {
+      const raw = initial[i] || {};
+      return { f: clampFrequency(raw.frequency ?? raw.f ?? fallback.f), g: clampFilterGain(raw.gain ?? raw.g ?? 0), q: clampQ(raw.q ?? raw.Q ?? DEFAULT_Q) };
+    });
+    const gain = clampMasterGain(settings?.gain ?? 1);
+
+    const source = audioContext.createMediaStreamSource(stream);
+    const entry = {
+      stream,
+      source,
+      host,
+      tab: { id: tab.id, title: tab.title || '', favIconUrl: tab.favIconUrl || '', url: tab.url || '' },
+      bands,
+      gain,
+      presetName: typeof settings?.activePreset === 'string' ? settings.activePreset : '',
+      analyzer: null,
+      lastAnalyzerUse: 0
+    };
+    buildChain(entry, bands, gain);
+    source.connect(entry.preGain);
+
+    const track = stream.getAudioTracks()[0];
+    track.onended = () => disconnectTab(tab.id); // tab closed / capture revoked
+
+    streams[tab.id] = entry;
+    dlog('capturing tab', tab.id, 'host', host, '— active streams:', Object.keys(streams).length);
+    broadcastStatus();
+  } catch (e) {
+    // Chain construction threw (context closed, node limit, …) — stop the acquired stream so we
+    // don't leave the tab captured with no way to reach it.
+    try {
+      stream.getTracks().forEach((t) => t.stop());
+    } catch (x) {
+      /* ignore */
+    }
+    // Mirror disconnectTab cleanup: the re-capture path may have emptied `streams` and resumed the
+    // context, so re-suspend when idle and refresh the popup (which would otherwise still list the tab).
+    if (audioContext && Object.keys(streams).length === 0) audioContext.suspend().catch((x) => dlog('suspend failed:', x && x.message));
+    broadcastStatus();
+    reportEngineError('startCapture: building chain failed', e);
+  }
+}
+
+function stopStream(tabId) {
+  const e = streams[tabId];
+  if (!e) return;
+  try {
+    e.stream.getTracks().forEach((t) => t.stop());
+  } catch (x) {
+    /* ignore */
+  }
+  for (const node of [e.source, e.preGain, ...(e.filters || []), e.postGain, e.analyzer]) {
+    if (node) {
+      try {
+        node.disconnect();
+      } catch (x) {
+        /* already gone */
+      }
+    }
+  }
+  delete streams[tabId];
+}
+
+function disconnectTab(tabId) {
+  pending.delete(tabId); // cancel an in-flight capture for this tab (startCapture stops its stream)
+  stopStream(tabId);
+  if (audioContext && Object.keys(streams).length === 0) {
+    // Clear the delayed samples before an idle/resume cycle, so a later capture cannot replay
+    // the final 5 ms of the old tab or inherit its gain-reduction envelope.
+    outputLimiter?.port.postMessage({ type: 'reset' });
+    audioContext.suspend().catch((e) => dlog('suspend failed:', e && e.message));
+  }
+  broadcastStatus();
+}
+
+// ---------------------------------------------------------------------------
+// Filter / gain mutations — every mutation targets ONE tab by tabId.
+
+const PARAM_TC = 0.012; // ~12ms exponential glide — click-free but responsive
+
+function setParamSmooth(param, value) {
+  if (!audioContext) {
+    param.value = value;
+    return;
+  }
+  const t = audioContext.currentTime;
+  param.cancelScheduledValues(t);
+  param.setTargetAtTime(value, t, PARAM_TC);
+}
+
+// Live master-gain drag (the popup's onGainLive). Bands + preset changes come through
+// applySettings; gain gets its own message so a volume drag doesn't resend 11 bands.
+function modifyGain(m) {
+  const e = streams[m.tabId];
+  if (!e) return;
+  if (m.activePreset !== undefined) e.presetName = m.activePreset || '';
+  const g = clampMasterGain(m.gain);
+  setParamSmooth(e.postGain.gain, g);
+  e.postGain.__t = g;
+  e.gain = g;
+}
+
+// Core: write a whole bands list + gain into one tab's chain.
+function applyToEntry(e, list, gain, presetName) {
+  if (presetName !== undefined) e.presetName = presetName || '';
+  const arr = Array.isArray(list) ? list : [];
+  for (let i = 0; i < NUM_FILTERS; i++) {
+    const raw = arr[i] || {};
+    const filter = e.filters[i];
+    if (!filter) continue;
+    const f = clampFrequency(raw.frequency ?? raw.f ?? DEFAULT_FREQUENCIES[i]);
+    const g = clampFilterGain(raw.gain ?? raw.g ?? 0);
+    const q = clampQ(raw.q ?? raw.Q ?? DEFAULT_Q);
+    setParamSmooth(filter.frequency, f);
+    setParamSmooth(filter.gain, g);
+    setParamSmooth(filter.Q, q);
+    filter.__t = { f, g, q };
+    e.bands[i] = { f, g, q };
+  }
+  if (gain != null) {
+    const master = clampMasterGain(gain);
+    setParamSmooth(e.postGain.gain, master);
+    e.postGain.__t = master;
+    e.gain = master;
+  }
+}
+
+// Live-drag + commit path. Deliberately does NOT broadcast: it fires up to ~30x/s during a drag.
+// The popup holds the active tab's curve optimistically, so it needs no echo here; discrete
+// actions (capture) broadcast instead.
+function applySettings(m) {
+  const e = streams[m.tabId];
+  if (!e) {
+    dlog('applySettings: NO stream for tab', m.tabId);
+    return;
+  }
+  if (m.tab && typeof m.tab.url === 'string' && m.tab.url) {
+    e.tab = { ...e.tab, ...m.tab, id: e.tab.id };
+    e.host = hostOf(m.tab.url);
+  }
+  applyToEntry(e, m.eqFilters, m.gain, m.activePreset);
+}
+
+// ---------------------------------------------------------------------------
+// Status + FFT for the popup
+
+async function buildStatus() {
+  const tabs = Object.values(streams).map((e) => ({
+    id: e.tab.id,
+    title: e.tab.title,
+    favIconUrl: e.tab.favIconUrl,
+    host: e.host,
+    url: e.tab.url,
+    eqFilters: e.bands.map((b, i) => ({ frequency: b.f, gain: b.g, q: b.q, type: typeOf(i) })),
+    gain: e.gain,
+    activePreset: e.presetName || ''
+  }));
+
+  return {
+    type: 'workspaceStatus',
+    build: BUILD,
+    initializing: !outputBus && !engineFailure,
+    failed: !!engineFailure,
+    error: engineFailure,
+    sampleRate: audioContext ? audioContext.sampleRate : 44100,
+    presets: {}, // the popup owns presets (sync storage); the engine no longer re-reads all of it here
+    tabs
+  };
+}
+
+async function broadcastStatus() {
+  const status = await buildStatus();
+  dlog('broadcast status — tabs:', (status.tabs || []).length);
+  chrome.runtime.sendMessage(status).catch((e) => dlog('broadcast dropped:', e && e.message));
+}
+
+// Answers one poll frame. `wantFft` is what the spectrum visualizer needs; the peak meter needs
+// only a single number, so a popup showing the meter alone does not pay for 2048 bins per frame.
+function handleFFT(tabId, sendResponse, wantFft) {
+  const e = streams[tabId] || streams[Object.keys(streams)[0]];
+  if (!e || !audioContext || !outputAnalyzers.length) {
+    sendResponse({ fft: null, peak: 0 });
+    return;
+  }
+  // The meter is the combined output AFTER the shared limiter. The spectrum remains the selected
+  // tab's post-EQ/pre-limiter response, which is useful while shaping that tab's curve.
+  const peak = readOutputPeak();
+  if (!wantFft) {
+    sendResponse({ fft: null, peak });
+    return;
+  }
+  if (!e.analyzer) {
+    e.analyzer = audioContext.createAnalyser();
+    e.analyzer.fftSize = 4096;
+    e.analyzer.smoothingTimeConstant = 0.7;
+    e.postGain.connect(e.analyzer);
+    e.freqBuf = new Float32Array(e.analyzer.frequencyBinCount);
+  }
+  e.lastAnalyzerUse = performance.now();
+  e.analyzer.getFloatFrequencyData(e.freqBuf);
+  sendResponse({ fft: Array.from(e.freqBuf, (v) => (Number.isFinite(v) ? Math.round(v) : -100)), peak });
+}
+
+// Drop each idle analyzer tap (saves CPU when a tab's visualizer stops asking).
+setInterval(() => {
+  const now = performance.now();
+  for (const id in streams) {
+    const e = streams[id];
+    if (e.analyzer && e.lastAnalyzerUse && now - e.lastAnalyzerUse > 1000) {
+      try {
+        e.postGain.disconnect(e.analyzer);
+      } catch (x) {
+        /* already disconnected */
+      }
+      e.analyzer = null;
+      e.freqBuf = null; // freed with the analyzer; reallocated if the visualizer asks again
+    }
+  }
+}, 1000);
+
+// ---------------------------------------------------------------------------
+// Message routing
+
+function reportEngineError(where, e) {
+  const msg = (e && (e.message || e.name)) || String(e);
+  console.error('[UmbraEQ offscreen] ' + where + ':', e);
+  chrome.runtime.sendMessage({ type: 'engineError', where, error: msg }).catch(() => {});
+}
+
+const withTimeout = (p, ms, label) =>
+  Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(label + ' timeout after ' + ms + 'ms')), ms))]);
+
+const ready = withTimeout(setupAudioNodes(), 5000, 'setupAudioNodes')
+  .then(() => {
+    dlog('audio engine ready, sampleRate', audioContext && audioContext.sampleRate);
+    broadcastStatus();
+  })
+  .catch((e) => {
+    engineFailure = (e && e.message) || String(e);
+    reportEngineError('setupAudioNodes failed', e);
+    throw e;
+  });
+// Handlers still receive the rejection, but an idle failed startup does not produce an unhandled one.
+ready.catch(() => {});
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.target !== 'offscreen') return;
+  if (message.type !== 'getFFT') dlog('recv', message.type); // getFFT fires ~30x/s — keep it out of the ring buffer
+
+  if (message.type === 'getLogs') {
+    sendResponse({
+      build: BUILD,
+      log: LOG.slice(),
+      state: {
+        hasAudioContext: !!audioContext,
+        contextState: audioContext && audioContext.state,
+        sampleRate: audioContext && audioContext.sampleRate,
+        streams: Object.keys(streams)
+      }
+    });
+    return true;
+  }
+
+  if (message.type === 'getStatus') {
+    ready
+      .then(() => buildStatus())
+      .then((s) => sendResponse(s))
+      .catch((e) => sendResponse({ type: 'engineError', where: 'getStatus', error: String((e && e.message) || e) }));
+    return true;
+  }
+
+  if (message.type === 'getFFT') {
+    // Always answer, even on a throw — a swallowed rejection here would leave sendResponse unfired
+    // and permanently stall the popup's rAF spectrum poll (it waits for the callback before the next).
+    ready
+      .then(() => handleFFT(message.tabId, sendResponse, message.wantFft !== false))
+      .catch((e) => {
+        dlog('getFFT failed:', e && e.message);
+        sendResponse({ fft: null, peak: 0 });
+      });
+    return true;
+  }
+
+  const run = async () => {
+    await ready;
+    switch (message.type) {
+      case 'startCapture':
+        await startCapture(message.streamId, message.tab, message.settings);
+        break;
+      case 'stopCapture':
+      case 'disconnectTab':
+        disconnectTab(message.tabId);
+        break;
+      case 'modifyGain':
+        modifyGain(message);
+        break;
+      case 'applySettings':
+        applySettings(message);
+        break;
+    }
+  };
+
+  run().catch((e) => reportEngineError('handler failed for ' + message.type, e));
+});

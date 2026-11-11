@@ -1,0 +1,497 @@
+import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
+
+export type Lang = 'en' | 'ru';
+
+type Vars = Record<string, string | number>;
+
+// Flat key -> string per language. {name} placeholders are filled by t(key, vars).
+const DICT: Record<Lang, Record<string, string>> = {
+  en: {
+    'note.stateReadFailed': 'Could not read your saved sound. Editing is paused; reopen Umbra to try again.',
+    'note.deleteFailed': 'Could not delete the preset. Try again.',
+    'nav.label': 'Workspace navigation',
+    'eq.scopeGlobal': 'Editing · global sound',
+    'eq.scopeGlobalHint': 'Used on captured tabs without a site rule',
+    'eq.scopeSite': 'Editing · {host}',
+    'eq.outputAllTabs': 'Output · all tabs',
+    'eq.shelfQ': 'Q does not apply to shelf filters',
+    'rules.soundLabel': 'Sound for this rule',
+    'note.captureNavigation': 'EQ stopped after navigation. Open Umbra on this page to start it again.',
+    'nav.eq': 'EQ',
+    'nav.presets': 'Presets',
+    'nav.rules': 'Rules',
+    'nav.tabs': 'Tabs',
+    'nav.more': 'More',
+
+    'eq.spectrum': 'Spectrum',
+    'eq.graphLabel': 'Equalizer bands — drag or use arrow keys',
+    'eq.roles': 'Band guide — what each dot controls',
+    'eq.preset': 'Preset',
+    'eq.presetNone': 'None',
+    'eq.bandN': 'Band {n}',
+    'eq.bandNone': 'Pick a point on the curve to type its numbers',
+    'eq.bandFreq': 'Frequency in hertz',
+    'eq.bandGain': 'Gain in decibels',
+    'eq.bandQ': 'Q — how wide the band is',
+    'eq.resetChanges': 'Reset',
+    'eq.resetChangesTitle': 'Put the sound back to what it was when you opened Umbra',
+    'note.changesReset': 'Sound put back',
+    'more.autoGain': 'Auto Gain',
+    'more.autoGainHint': 'Matches the approximate level before and after EQ for comparison. Your saved volume and profiles keep their original values.',
+    'more.undoReset': 'Undo the last reset',
+    'more.undoResetHint': 'Puts back exactly what that reset overwrote. Saving anything else replaces it.',
+    'eq.presetBasedOn': 'Based on {name}',
+    'eq.zoneBass': 'Bass',
+    'eq.zoneMid': 'Mids',
+    'eq.zoneTreble': 'Treble',
+    'eq.zoneAir': 'Air',
+    'eq.loud': 'Loud audio can harm your hearing, so keep it sensible',
+    'capture.uncapturable': "Umbra can't shape audio on the browser's own pages. Open a normal page to use the equalizer.",
+    'capture.stopped': 'The equalizer is off for this tab.',
+    'capture.idle': 'The equalizer is not running on this tab.',
+    'capture.error': 'Audio capture could not start.',
+    'capture.retry': 'Try again',
+    'eq.bypassTitle': 'Bypass the equalizer — hear the tab unchanged',
+    'eq.saveForSite': 'Save for {host}',
+    'eq.saveForSiteTitle': 'Keep this sound for this site only, and put the everywhere-sound back',
+    'eq.updateRule': 'Update {host}',
+    'eq.updateRuleTitle': "Replace this site's saved sound with what you are hearing now",
+    'eq.bypassOn': 'EQ bypassed',
+    'eq.undo': 'Undo',
+    'more.resetProfile': 'Reset saved sound',
+    'more.resetProfileConfirm': 'Tap again to confirm',
+    'more.resetProfileRule': 'Deletes the rule for {host}, so it falls back to your everywhere sound.',
+    'more.resetProfileGlobal': 'Flattens the sound played on every tab without a rule of its own.',
+    'note.profileReset': 'Saved sound reset.',
+    'note.undoSuperseded': 'The sound changed in another window, so that reset cannot be undone while it differs.',
+    'note.undoUnavailable': 'Could not read the saved sound just now, so nothing was changed. Try again.',
+    'note.savedForSite': 'Saved for {host}. Your everywhere-sound is unchanged.',
+    'note.ruleUpdated': 'Updated the saved sound for {host}.',
+    'note.savedForSitePartial': 'Saved for {host}, but the everywhere-sound could not be put back.',
+    'engine.stale': 'STALE — reload the extension',
+    'engine.error': 'Engine error — reload the extension',
+    'engine.notResponding': 'Engine not responding — reload the extension',
+    'eq.eqThisTab': 'EQ This Tab',
+    'eq.stop': 'Stop EQing',
+    'eq.reset': 'Reset',
+    'eq.resetTitle': 'Reset the current sound to flat',
+    'eq.globalProfile': 'Global sound · unless a site rule applies',
+    'eq.resetGlobalTitle': 'Reset the global profile to flat',
+
+    'presets.title': 'Presets',
+    'presets.placeholder': 'Name a preset…',
+    'presets.save': '+ Save',
+    'presets.update': 'Update',
+    'presets.none': 'No presets yet. Shape the EQ, type a name, then Save.',
+    'presets.export': 'Export',
+    'presets.import': 'Import file',
+    'presets.deleteTitle': 'Delete "{name}"',
+    'presets.hideTitle': 'Hide (restore below)',
+    'presets.restore': 'Restore built-ins',
+
+    'tabs.title': 'Active tabs',
+    'tabs.none': "No tabs are being EQ'd. Start with EQ This Tab.",
+    'tabs.stop': 'Stop',
+    'tabs.local': 'local',
+    'tabs.untitled': '(untitled)',
+
+    'more.title': 'More',
+    'more.theme': 'Theme',
+    'more.themeDesc': 'Color of the graph and accents',
+    'more.language': 'Language',
+    'more.languageDesc': 'Interface language',
+    'more.fullWindow': 'Full window',
+    'more.fullWindowDesc': 'Open the equalizer in its own tab (edits the global sound)',
+    'more.custom': 'Custom',
+    'more.guide': 'Guide',
+
+    'share.copyCode': 'Copy code',
+    'share.pasteCode': 'Paste code',
+    'share.import': 'Import the pasted code',
+
+    'howto.title': 'How to use Umbra EQ',
+    'howto.axis.gain': 'louder / quieter',
+    'howto.axis.freq': 'lower / higher',
+    'howto.graph.h': 'The graph',
+    'howto.graph.p': 'Drag a point up or down to boost or cut. Drag it sideways to pick the frequency.',
+    'howto.graph.q': 'Eleven points, low to high. Double-click one to put it back to flat.',
+    'howto.keys.h': 'From the keyboard',
+    'howto.keys.p': 'Tab to a point, then shape it. Every press is saved on its own.',
+    'howto.keys.coarse': 'bigger step',
+    'howto.keys.fine': 'finer step',
+    'howto.keys.q': 'width (Q), bell filters only',
+    'howto.keys.flat': 'back to flat',
+    'howto.fields.h': 'Type the numbers',
+    'howto.fields.p': 'Click a point and its three values become fields you can type into.',
+    'howto.fields.band': 'Band 6',
+    'howto.fields.tab': 'next field',
+    'howto.fields.enter': 'apply',
+    'howto.fields.esc': 'cancel',
+    'howto.presets.h': 'Presets',
+    'howto.presets.p': 'Apply one, then shape it. The header keeps saying where the curve came from.',
+    'howto.presets.drag': 'shape it',
+    'howto.bypass.h': 'Bypass',
+    'howto.bypass.p': 'Hear the tab unshaped while the curve stays editable — the honest way to compare.',
+    'howto.bypass.q': 'Nothing is saved until you switch bypass off.',
+    'howto.bypass.audible': 'what you hear',
+    'howto.bypass.preview': 'what you are shaping',
+    'howto.autogain.h': 'Auto Gain',
+    'howto.autogain.p': 'Keeps the tab at about the level it was, so you judge the curve and not the loudness.',
+    'howto.autogain.q': 'It changes only what you hear. Your volume and saved sounds are untouched.',
+    'howto.autogain.off': 'off',
+    'howto.autogain.on': 'on',
+    'howto.autogain.same': 'same level',
+    'howto.meters.h': 'Spectrum and peak',
+    'howto.meters.p': 'The spectrum shows what is playing. The bar shows how close it is to clipping.',
+    'howto.meters.q': 'Both only show. Neither changes the sound.',
+    'howto.meters.spectrum': 'spectrum',
+    'howto.meters.peak': 'peak',
+    'howto.reset.h': 'Reset and Undo',
+    'howto.reset.p': 'Reset puts the saved sound back the way it was. Undo takes that reset back.',
+    'howto.reset.q': 'Undo stays until you save something else, or the sound changes in another window.',
+    'howto.reset.yours': 'your sound',
+    'howto.reset.action': 'Reset',
+    'howto.reset.before': 'as it was',
+    'howto.reset.undo': 'Undo',
+    'howto.rules.h': 'One sound, and site rules',
+    'howto.rules.p': 'Your everywhere sound plays on every tab. A site rule replaces it for that site.',
+    'howto.rules.q': 'First matching rule wins. Rules apply live on tabs you already have EQ on.',
+    'howto.rules.global': 'everywhere sound',
+    'howto.fullwindow.h': 'Full window',
+    'howto.fullwindow.p': 'More room to shape. It always edits the everywhere sound, never one tab.',
+    'howto.fullwindow.popup': 'popup',
+    'howto.fullwindow.full': 'full window',
+    'howto.tabs.h': 'Many tabs at once',
+    'howto.tabs.p': 'Every tab you EQ keeps its own chain, so a film and a playlist can differ.',
+    'howto.privacy.h': 'Private by design',
+    'howto.privacy.p': 'The audio is processed on your computer and never leaves it.',
+    'howto.privacy.q': 'No account, no network, no analytics.',
+    'howto.privacy.device': 'your computer',
+
+    'vol.vol': 'VOL',
+    'vol.master': 'Master volume',
+
+    'rules.title': 'Site rules',
+    'rules.guide': 'Guide',
+    'rules.ruleForUsing': 'Rule for {host} using the current sound:',
+    'rules.quickExact': 'Exact address',
+    'rules.quickAnyTld': 'Any ending',
+    'rules.quickAnySub': 'Whole site',
+    'rules.quickExactTip': 'Only this exact web address',
+    'rules.quickAnyTldTip': 'Same name, any ending (.com, .ru, .gg…)',
+    'rules.quickAnySubTip': 'Any page of this site (music., www., …)',
+    'rules.none': 'No rules yet. Add one for the current site above, or a blank rule below. A rule applies a sound to sites automatically.',
+    'rules.add': 'Add rule',
+    'rules.placeholder': 'youtube.  •  film. kino.',
+    'rules.customCurve': 'Custom sound',
+    'rules.matches': '● matches this site',
+    'rules.enabledLabel': 'Rule on / off',
+    'rules.deleteTitle': 'Delete rule',
+
+    'guide.intro':
+      'Umbra plays one sound on every tab; a rule overrides it for the sites you pick. Type just the site address (youtube.com) — not the full page link; www. is ignored. The first rule that fits a site wins.',
+    'guide.row.exact': 'only this exact address',
+    'guide.row.anyEnd': 'youtube with any ending — .com, .ru, .gg…',
+    'guide.row.anywhere': 'youtube anywhere — also music.youtube.com',
+    'guide.row.anyPage': 'any page of youtube.com (music., www., …)',
+    'guide.row.several': 'several sites in one rule — separate with a space',
+    'guide.tip': 'Tip: to cover a site and its mirrors, list them: film. kino. flix.',
+    'guide.close': 'Close',
+    'guide.applyNote': 'Rules take effect right away on tabs you have EQ on.',
+
+    'note.saved': 'Saved preset "{name}".',
+    'note.deleted': 'Deleted "{name}".',
+    'note.imported': 'Imported {n} preset(s).',
+    'note.importFailed': 'Import failed: {err}.',
+    'note.saveFailed': 'Save failed (sync storage unavailable).',
+    'note.notFound': 'Preset "{name}" not found.',
+    'note.typeName': 'Type a name in the box, then Save.',
+    'note.ruleAdded': 'Added rule "{pattern}".',
+    'note.ruleAddedReeq': 'Added rule "{pattern}". Applied to matching tabs now.',
+    'note.noSite': 'No site to add a rule for.',
+    'note.rulesSaveFailed': 'Rules save failed (sync storage full?).',
+    'note.rulesUnreadBoot': 'Could not read your site rules, so none are shown and saving them is paused. Reopen Umbra to try again.',
+    'note.rulesUnreadStale': 'Could not re-read your site rules, so the list may be out of date and saving them is paused until it can be read.',
+    'note.couldNotEq': 'Could not EQ this tab: {err}',
+    'note.codeCopied': 'Copied share code to clipboard.',
+    'note.copyFailed': 'Copy failed — clipboard unavailable.',
+    'note.codeImported': 'Imported from code: {p} preset(s), {r} rule(s).',
+    'note.codeInvalid': 'Clipboard has no valid Umbra code.'
+  },
+  ru: {
+    'note.stateReadFailed': 'Не удалось прочитать сохранённый звук. Редактирование приостановлено — открой Umbra заново.',
+    'note.deleteFailed': 'Не удалось удалить пресет. Попробуй ещё раз.',
+    'nav.label': 'Навигация по разделам',
+    'eq.scopeGlobal': 'Редактируется · общий звук',
+    'eq.scopeGlobalHint': 'Для вкладок с EQ, у которых нет правила сайта',
+    'eq.scopeSite': 'Редактируется · {host}',
+    'eq.outputAllTabs': 'Выход · все вкладки',
+    'eq.shelfQ': 'Q не используется полочными фильтрами',
+    'rules.soundLabel': 'Звук для этого правила',
+    'note.captureNavigation': 'Эквалайзер остановлен после перехода. Открой Umbra на этой странице, чтобы включить его снова.',
+    'nav.eq': 'Эквалайзер',
+    'nav.presets': 'Пресеты',
+    'nav.rules': 'Правила',
+    'nav.tabs': 'Вкладки',
+    'nav.more': 'Ещё',
+
+    'eq.spectrum': 'Спектр',
+    'eq.graphLabel': 'Полосы эквалайзера — тяни или стрелками',
+    'eq.roles': 'Подсказка — за что отвечает точка',
+    'eq.preset': 'Пресет',
+    'eq.presetNone': 'Нет',
+    'eq.bandN': 'Полоса {n}',
+    'eq.bandNone': 'Выбери точку на кривой, чтобы вводить её значения',
+    'eq.bandFreq': 'Частота в герцах',
+    'eq.bandGain': 'Усиление в децибелах',
+    'eq.bandQ': 'Q — ширина полосы',
+    'eq.resetChanges': 'Вернуть',
+    'eq.resetChangesTitle': 'Вернуть звук к тому, каким он был при открытии Umbra',
+    'note.changesReset': 'Звук возвращён',
+    'more.autoGain': 'Авто-громкость',
+    'more.autoGainHint': 'Выравнивает громкость до и после EQ для сравнения. Сохранённые настройки громкости и профилей не меняются.',
+    'more.undoReset': 'Отменить последний сброс',
+    'more.undoResetHint': 'Вернёт ровно то, что сброс затёр. Любое другое сохранение его заменит.',
+    'eq.presetBasedOn': 'На основе {name}',
+    'eq.zoneBass': 'Бас',
+    'eq.zoneMid': 'Середина',
+    'eq.zoneTreble': 'Верх',
+    'eq.zoneAir': 'Воздух',
+    'eq.loud': 'Громкий звук вредит слуху — не переусердствуй',
+    'capture.uncapturable': 'Umbra не обрабатывает звук на служебных страницах браузера. Открой обычную страницу.',
+    'capture.stopped': 'Эквалайзер для этой вкладки выключен.',
+    'capture.idle': 'Эквалайзер на этой вкладке не запущен.',
+    'capture.error': 'Не удалось начать захват звука.',
+    'capture.retry': 'Повторить',
+    'eq.bypassTitle': 'Обойти эквалайзер — услышать вкладку без обработки',
+    'eq.saveForSite': 'Сохранить для {host}',
+    'eq.saveForSiteTitle': 'Оставить этот звук только для этого сайта, а общий вернуть как был',
+    'eq.updateRule': 'Обновить {host}',
+    'eq.updateRuleTitle': 'Заменить сохранённый звук сайта на тот, что слышишь сейчас',
+    'eq.bypassOn': 'EQ обойдён',
+    'eq.undo': 'Вернуть',
+    'more.resetProfile': 'Сбросить сохранённый звук',
+    'more.resetProfileConfirm': 'Нажми ещё раз для подтверждения',
+    'more.resetProfileRule': 'Удалит правило для {host} — сайт вернётся к общему звуку.',
+    'more.resetProfileGlobal': 'Сделает плоским звук, который играет на всех вкладках без своего правила.',
+    'note.profileReset': 'Сохранённый звук сброшен.',
+    'note.undoSuperseded': 'Звук изменился в другом окне, поэтому пока он отличается, сброс отменить нельзя.',
+    'note.undoUnavailable': 'Не удалось прочитать сохранённый звук, поэтому ничего не изменилось. Попробуйте ещё раз.',
+    'note.savedForSite': 'Сохранено для {host}. Общий звук не изменился.',
+    'note.ruleUpdated': 'Сохранённый звук для {host} обновлён.',
+    'note.savedForSitePartial': 'Сохранено для {host}, но общий звук вернуть не удалось.',
+    'engine.stale': 'Устарело — перезагрузи расширение',
+    'engine.error': 'Ошибка движка — перезагрузи расширение',
+    'engine.notResponding': 'Движок не отвечает — перезагрузи расширение',
+    'eq.eqThisTab': 'Включить на вкладке',
+    'eq.stop': 'Выключить',
+    'eq.reset': 'Сброс',
+    'eq.resetTitle': 'Сбросить текущий звук в ноль',
+    'eq.globalProfile': 'Общий звук · если нет правила сайта',
+    'eq.resetGlobalTitle': 'Сбросить общий профиль в ноль',
+
+    'presets.title': 'Пресеты',
+    'presets.placeholder': 'Название пресета…',
+    'presets.save': '+ Сохранить',
+    'presets.update': 'Обновить',
+    'presets.none': 'Пресетов пока нет. Настрой звук, впиши название и сохрани.',
+    'presets.export': 'Экспорт',
+    'presets.import': 'Импорт из файла',
+    'presets.deleteTitle': 'Удалить «{name}»',
+    'presets.hideTitle': 'Скрыть (вернуть ниже)',
+    'presets.restore': 'Вернуть встроенные',
+
+    'tabs.title': 'Активные вкладки',
+    'tabs.none': 'Ни одна вкладка не эквализируется. Нажми «Включить на вкладке».',
+    'tabs.stop': 'Стоп',
+    'tabs.local': 'локально',
+    'tabs.untitled': 'Без названия',
+
+    'more.title': 'Ещё',
+    'more.theme': 'Тема',
+    'more.themeDesc': 'Цвет графика и акцентов',
+    'more.language': 'Язык',
+    'more.languageDesc': 'Язык интерфейса',
+    'more.fullWindow': 'Во всё окно',
+    'more.fullWindowDesc': 'Открыть эквалайзер в отдельной вкладке (правит общий звук)',
+    'more.custom': 'Свой цвет',
+    'more.guide': 'Как пользоваться',
+
+    'share.copyCode': 'Копировать код',
+    'share.pasteCode': 'Вставить код',
+    'share.import': 'Импортировать вставленный код',
+
+    'howto.title': 'Как пользоваться Umbra EQ',
+    'howto.axis.gain': 'громче / тише',
+    'howto.axis.freq': 'ниже / выше',
+    'howto.graph.h': 'График',
+    'howto.graph.p': 'Тяни точку вверх или вниз, чтобы поднять или убрать. В стороны — выбрать частоту.',
+    'howto.graph.q': 'Одиннадцать точек, от низов к верхам. Двойной клик возвращает точку в ноль.',
+    'howto.keys.h': 'С клавиатуры',
+    'howto.keys.p': 'Дойди до точки через Tab и меняй её. Каждое нажатие сохраняется отдельно.',
+    'howto.keys.coarse': 'крупный шаг',
+    'howto.keys.fine': 'мелкий шаг',
+    'howto.keys.q': 'ширина (Q), только пиковые полосы',
+    'howto.keys.flat': 'вернуть в ноль',
+    'howto.fields.h': 'Ввод чисел',
+    'howto.fields.p': 'Нажми на точку — три её значения станут полями, в которые можно печатать.',
+    'howto.fields.band': 'Полоса 6',
+    'howto.fields.tab': 'следующее поле',
+    'howto.fields.enter': 'применить',
+    'howto.fields.esc': 'отменить',
+    'howto.presets.h': 'Пресеты',
+    'howto.presets.p': 'Примени пресет и правь его. В шапке видно, откуда взялась кривая.',
+    'howto.presets.drag': 'правишь',
+    'howto.bypass.h': 'Байпас',
+    'howto.bypass.p': 'Слушай вкладку без обработки, продолжая править кривую — честный способ сравнить.',
+    'howto.bypass.q': 'Ничего не сохраняется, пока байпас не выключен.',
+    'howto.bypass.audible': 'что слышно',
+    'howto.bypass.preview': 'что правишь',
+    'howto.autogain.h': 'Авто-громкость',
+    'howto.autogain.p': 'Держит вкладку примерно на прежнем уровне, чтобы судить кривую, а не громкость.',
+    'howto.autogain.q': 'Меняет только звучание. Твоя громкость и сохранённые профили не трогаются.',
+    'howto.autogain.off': 'выкл',
+    'howto.autogain.on': 'вкл',
+    'howto.autogain.same': 'тот же уровень',
+    'howto.meters.h': 'Спектр и пик',
+    'howto.meters.p': 'Спектр показывает, что играет. Полоска — насколько близко до перегруза.',
+    'howto.meters.q': 'Оба только показывают. Ни один не меняет звук.',
+    'howto.meters.spectrum': 'спектр',
+    'howto.meters.peak': 'пик',
+    'howto.reset.h': 'Сброс и отмена',
+    'howto.reset.p': 'Сброс возвращает сохранённый звук к прежнему. Отмена возвращает сам сброс.',
+    'howto.reset.q': 'Отмена живёт, пока не сохранишь другое или звук не изменится в другом окне.',
+    'howto.reset.yours': 'твой звук',
+    'howto.reset.action': 'Сброс',
+    'howto.reset.before': 'как было',
+    'howto.reset.undo': 'Отменить',
+    'howto.rules.h': 'Один звук и правила сайтов',
+    'howto.rules.p': 'Общий звук играет на всех вкладках. Правило сайта заменяет его для этого сайта.',
+    'howto.rules.q': 'Срабатывает первое подходящее правило. Правила применяются сразу.',
+    'howto.rules.global': 'общий звук',
+    'howto.fullwindow.h': 'Отдельное окно',
+    'howto.fullwindow.p': 'Больше места для правки. Оно всегда правит общий звук, а не одну вкладку.',
+    'howto.fullwindow.popup': 'попап',
+    'howto.fullwindow.full': 'отдельное окно',
+    'howto.tabs.h': 'Много вкладок сразу',
+    'howto.tabs.p': 'У каждой вкладки с EQ своя цепочка, поэтому фильм и плейлист могут звучать по-разному.',
+    'howto.privacy.h': 'Приватность по устройству',
+    'howto.privacy.p': 'Звук обрабатывается на твоём компьютере и никуда не уходит.',
+    'howto.privacy.q': 'Ни аккаунта, ни сети, ни аналитики.',
+    'howto.privacy.device': 'твой компьютер',
+
+    'vol.vol': 'ГРОМ',
+    'vol.master': 'Общая громкость',
+
+    'rules.title': 'Правила сайтов',
+    'rules.guide': 'Гайд',
+    'rules.ruleForUsing': 'Правило для {host} с текущим звуком:',
+    'rules.quickExact': 'Точный адрес',
+    'rules.quickAnyTld': 'Любое окончание',
+    'rules.quickAnySub': 'Весь сайт',
+    'rules.quickExactTip': 'Только этот точный адрес',
+    'rules.quickAnyTldTip': 'То же имя, любое окончание (.com, .ru, .gg…)',
+    'rules.quickAnySubTip': 'Любая страница сайта (music., www., …)',
+    'rules.none': 'Правил пока нет. Добавь для текущего сайта сверху или пустое снизу. Правило применяет звук к сайтам само.',
+    'rules.add': 'Добавить правило',
+    'rules.placeholder': 'youtube.  •  film. kino.',
+    'rules.customCurve': 'Свой звук',
+    'rules.matches': '● подходит этому сайту',
+    'rules.enabledLabel': 'Правило вкл / выкл',
+    'rules.deleteTitle': 'Удалить правило',
+
+    'guide.intro':
+      'Umbra играет один звук на всех вкладках; правило перебивает его для выбранных сайтов. Впиши только адрес сайта (youtube.com), не всю ссылку на страницу; www. не важен. Срабатывает первое подходящее правило.',
+    'guide.row.exact': 'только этот точный адрес',
+    'guide.row.anyEnd': 'youtube с любым окончанием — .com, .ru, .gg…',
+    'guide.row.anywhere': 'youtube где угодно — и music.youtube.com',
+    'guide.row.anyPage': 'любая страница youtube.com (music., www., …)',
+    'guide.row.several': 'несколько сайтов в одном правиле — через пробел',
+    'guide.tip': 'Совет: чтобы покрыть сайт и его зеркала, перечисли: film. kino. flix.',
+    'guide.close': 'Закрыть',
+    'guide.applyNote': 'Правила срабатывают сразу на вкладках, где включён EQ.',
+
+    'note.saved': 'Пресет «{name}» сохранён.',
+    'note.deleted': '«{name}» удалён.',
+    'note.imported': 'Импортировано пресетов: {n}.',
+    'note.importFailed': 'Импорт не удался: {err}.',
+    'note.saveFailed': 'Сохранение не удалось (sync-хранилище недоступно).',
+    'note.notFound': 'Пресет «{name}» не найден.',
+    'note.typeName': 'Впиши название в поле и сохрани.',
+    'note.ruleAdded': 'Добавлено правило «{pattern}».',
+    'note.ruleAddedReeq': 'Добавлено правило «{pattern}». Применено к подходящим вкладкам.',
+    'note.noSite': 'Нет сайта для правила.',
+    'note.rulesSaveFailed': 'Не удалось сохранить правила (sync-хранилище переполнено?).',
+    'note.rulesUnreadBoot': 'Не удалось прочитать правила сайтов: они не показаны, а их сохранение приостановлено. Открой Umbra заново.',
+    'note.rulesUnreadStale': 'Не удалось перечитать правила сайтов: список может быть устаревшим, а их сохранение приостановлено до успешного чтения.',
+    'note.couldNotEq': 'Не удалось включить на вкладке: {err}',
+    'note.codeCopied': 'Код скопирован в буфер обмена.',
+    'note.copyFailed': 'Копирование не удалось — буфер недоступен.',
+    'note.codeImported': 'Из кода импортировано: пресетов {p}, правил {r}.',
+    'note.codeInvalid': 'В буфере нет корректного кода Umbra.'
+  }
+};
+
+// Module-level current language so non-React code (useEngine callbacks) can call t().
+let _lang: Lang = 'en';
+
+export function getLang(): Lang {
+  return _lang;
+}
+
+export function t(key: string, vars?: Vars): string {
+  let s = DICT[_lang][key] ?? DICT.en[key] ?? key;
+  // Function replacement so a `$` in an (untrusted) value — e.g. a preset name or rule pattern shown
+  // in a notice — is inserted literally, not treated as a `$&`/`$1` replacement pattern.
+  if (vars) for (const k in vars) s = s.replaceAll('{' + k + '}', () => String(vars[k]));
+  return s;
+}
+
+function detectLang(): Lang {
+  try {
+    const saved = localStorage.UMBRA_LANG;
+    if (saved === 'en' || saved === 'ru') return saved;
+  } catch {
+    /* ignore */
+  }
+  try {
+    if ((navigator.language || '').toLowerCase().startsWith('ru')) return 'ru';
+  } catch {
+    /* ignore */
+  }
+  return 'en';
+}
+
+const LangCtx = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: 'en', setLang: () => {} });
+
+export function LangProvider({ children }: { children: ReactNode }) {
+  const [lang, setLangState] = useState<Lang>(() => {
+    const l = detectLang();
+    _lang = l; // sync module before first render
+    return l;
+  });
+  useEffect(() => {
+    _lang = lang;
+    document.documentElement.lang = lang;
+  }, [lang]);
+  const setLang = (l: Lang) => {
+    _lang = l;
+    try {
+      localStorage.UMBRA_LANG = l;
+    } catch {
+      /* ignore */
+    }
+    setLangState(l);
+  };
+  return <LangCtx.Provider value={{ lang, setLang }}>{children}</LangCtx.Provider>;
+}
+
+export function useLang() {
+  return useContext(LangCtx);
+}
+
+// Subscribe to language changes (re-render on switch) and return the t function.
+export function useT() {
+  useContext(LangCtx);
+  return t;
+}

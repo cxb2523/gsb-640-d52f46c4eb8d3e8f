@@ -1,0 +1,517 @@
+// Messaging + storage + preset I/O. This is the popup's side of the
+// popup <-> service-worker <-> offscreen protocol, unchanged since the pre-React popup.
+import {
+  NUM_FILTERS,
+  clampMasterGain,
+  sanitizeFilter,
+  type Band
+} from './audio';
+import { coerceBands, normalizePresets, presetBandsEqual, UNSAFE_KEYS, type PresetBands } from './presets';
+import { parsePatterns, newRuleId, type Rule } from './rules';
+import { quantizeRules } from './quantize';
+export { flatBands, presetToBands } from './sound-profile';
+import { flatBands } from './sound-profile';
+
+export const BUILD = '2.5.0';
+export const PRESET_PREFIX = 'PRESETS.';
+export const RULES_KEY = 'RULES'; // sync: ordered domain-rules array
+export const AUTO_GAIN_KEY = 'AUTO_GAIN'; // local: shared with the service worker
+
+export const hasChrome = () => typeof chrome !== 'undefined' && !!chrome.runtime;
+
+export interface ActiveTab {
+  id: number | null;
+  host: string;
+  title: string;
+  favIconUrl?: string;
+  capturable: boolean;
+}
+
+// Which tab the popup is looking at (so it edits that tab's EQ). Answered by the
+// service worker from chrome.tabs.query({active,currentWindow}).
+export function getActiveTab(): Promise<ActiveTab> {
+  return new Promise((resolve) => {
+    if (!hasChrome()) {
+      resolve({ id: null, host: '', title: '', capturable: false });
+      return;
+    }
+    toBackground('getActiveTab', {}, (r: any) => resolve(r || { id: null, host: '', title: '', capturable: false }));
+  });
+}
+
+// Are we the "Full window" page (opened in its own tab), not the browser-action popup?
+// chrome.tabs.getCurrent resolves to the running tab in a real tab, and to undefined in a
+// popup — the canonical way to tell the two apart (both load the same index.html). Used to
+// run the full-window page as a GLOBAL-PROFILE editor (its own tab isn't capturable).
+export function isFullWindowTab(): Promise<boolean> {
+  return new Promise((resolve) => {
+    try {
+      if (!hasChrome() || !chrome.tabs || !chrome.tabs.getCurrent) {
+        resolve(false);
+        return;
+      }
+      chrome.tabs.getCurrent((tab) => {
+        void chrome.runtime.lastError;
+        resolve(!!tab);
+      });
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+// Global profile (v2 source of truth) — the sound played on every tab with no matching rule.
+// The popup writes it (writeDefaultEq) and resolves each tab from it. Stored as a curve.
+export const DEFAULT_EQ_KEY = 'DEFAULT_EQ';
+// Write-ahead record of the edit in progress. Deliberately in `local`: it is written often during a
+// drag, and local has no write-rate quota (sync caps writes per minute AND per hour). It is also
+// per-machine by nature — a half-finished edit is not something to sync to other devices.
+export const JOURNAL_KEY = 'EDIT_JOURNAL';
+/**
+ * `updatedAt` has always been written here; it just wasn't read back. The edit journal needs it to
+ * tell "my unsaved edit is newer" from "a normal save already superseded it", so it is surfaced
+ * now. Absent on records written before this field existed, hence nullable.
+ */
+export type StoredGlobal = { bands: Band[]; gain: number; presetName: string; updatedAt: number | null };
+
+/** Shared by the swallowing read and the reporting one, so they cannot parse differently. */
+function parseDefaultEq(v: any): StoredGlobal | null {
+  if (v && Array.isArray(v.filters) && v.filters.length === NUM_FILTERS) {
+    const bands = v.filters.map((b: any, i: number) => sanitizeFilter({ frequency: b.f, gain: b.g, q: b.q }, i));
+    const updatedAt = typeof v.updatedAt === 'number' && Number.isFinite(v.updatedAt) ? v.updatedAt : null;
+    // `preset` is provenance — which preset this curve came from, not a claim it still equals
+    // it. Absent on records written before the field existed, which reads as 'came from nowhere'.
+    const presetName = typeof v.preset === 'string' ? v.preset : '';
+    return { bands, gain: clampMasterGain(v.gain ?? 1), presetName, updatedAt };
+  }
+  return null;
+}
+
+export async function readDefaultEq(): Promise<StoredGlobal | null> {
+  const result = await readDefaultEqResult();
+  return result.ok ? result.value : null;
+}
+
+/** Recovery must distinguish an absent profile from a failed read. */
+export async function readDefaultEqResult(): Promise<{ ok: true; value: StoredGlobal | null } | { ok: false; error: string }> {
+  if (!hasChrome() || !chrome.storage) return { ok: false, error: 'no storage' };
+  try {
+    const r: any = await chrome.storage.local.get(DEFAULT_EQ_KEY);
+    return { ok: true, value: parseDefaultEq(r[DEFAULT_EQ_KEY]) };
+  } catch (e) {
+    return { ok: false, error: (e as Error)?.message || String(e) };
+  }
+}
+
+/**
+ * Both halves of the stored world, or null when either read FAILED.
+ *
+ * The distinction the ordinary readers cannot make. `readRules` answers `[]` for both "there are
+ * no rules" and "the read threw", and `readDefaultEq` answers `null` for both "nothing is stored"
+ * and "the read threw". That is fine for painting a UI and fatal for a decision: the reset undo
+ * compares the world against the one its reset produced, and a reset performed on an install with
+ * no rules produces exactly the fingerprint of `[]`. A swallowed failure then reproduces it, the
+ * comparison says "unchanged", and the undo writes an empty rules array over a rule that arrived
+ * in the meantime. The read has to be able to say "I don't know" for the caller to refuse.
+ *
+ * Both areas are read together because they fail independently — RULES is in `sync`, DEFAULT_EQ in
+ * `local`, different backends — and a decision made on half a world is not made on the world.
+ */
+export async function readWorld(): Promise<{ rules: Rule[]; global: StoredGlobal | null } | null> {
+  if (!hasChrome() || !chrome.storage) return null;
+  try {
+    const [r, g] = await Promise.all([chrome.storage.sync.get(RULES_KEY), chrome.storage.local.get(DEFAULT_EQ_KEY)]);
+    return { rules: Array.isArray((r as any)[RULES_KEY]) ? (r as any)[RULES_KEY] : [], global: parseDefaultEq((g as any)[DEFAULT_EQ_KEY]) };
+  } catch {
+    return null; // "I don't know" — never "it is empty"
+  }
+}
+/**
+ * Outcome of a persistence attempt. Returned rather than swallowed: a write that fails silently
+ * leaves the UI claiming a sound is saved while storage disagrees, which is the hardest class of
+ * bug to notice and the easiest to lose data to.
+ */
+export type PersistResult = { ok: true } | { ok: false; error: string };
+
+const persistFailed = (e: unknown): PersistResult => ({ ok: false, error: (e as Error)?.message || String(e) });
+
+/** Migrate the former popup-only preference the first time the popup is opened. */
+export async function readAutoGainPreference(): Promise<boolean> {
+  let legacy = false;
+  try { legacy = localStorage.AUTO_GAIN === '1'; } catch {}
+  if (!hasChrome() || !chrome.storage) return legacy;
+  try {
+    const stored = await chrome.storage.local.get(AUTO_GAIN_KEY);
+    if (typeof stored[AUTO_GAIN_KEY] === 'boolean') return stored[AUTO_GAIN_KEY];
+    await chrome.storage.local.set({ [AUTO_GAIN_KEY]: legacy });
+  } catch {}
+  return legacy;
+}
+
+export async function writeAutoGainPreference(on: boolean): Promise<PersistResult> {
+  try {
+    if (hasChrome() && chrome.storage) await chrome.storage.local.set({ [AUTO_GAIN_KEY]: on });
+    try { localStorage.AUTO_GAIN = on ? '1' : '0'; } catch {}
+    return { ok: true };
+  } catch (e) {
+    return persistFailed(e);
+  }
+}
+
+export async function writeDefaultEq(bands: Band[], gain: number, presetName = ''): Promise<PersistResult> {
+  if (!hasChrome() || !chrome.storage) return { ok: false, error: 'no storage' };
+  const filters = bands.map((b) => ({ f: b.frequency, g: b.gain, q: b.q }));
+  try {
+    await chrome.storage.local.set({
+      [DEFAULT_EQ_KEY]: { v: 1, filters, gain: clampMasterGain(gain), preset: presetName, updatedAt: Date.now() }
+    });
+
+    return { ok: true };
+  } catch (e) {
+    return persistFailed(e);
+  }
+}
+
+/**
+ * Remove the stored global profile entirely. Not the same as writing a flat one: on a fresh install
+ * there was no profile at all, and putting things "back" has to restore that absence.
+ */
+export async function clearDefaultEq(): Promise<PersistResult> {
+  if (!hasChrome() || !chrome.storage) return { ok: false, error: 'no storage' };
+  try {
+
+    await chrome.storage.local.remove(DEFAULT_EQ_KEY);
+    return { ok: true };
+  } catch (e) {
+    return persistFailed(e);
+  }
+}
+
+export async function writeJournal(journal: unknown): Promise<PersistResult> {
+  if (!hasChrome() || !chrome.storage) return { ok: false, error: 'no storage' };
+  try {
+    await chrome.storage.local.set({ [JOURNAL_KEY]: journal });
+
+    return { ok: true };
+  } catch (e) {
+    return persistFailed(e);
+  }
+}
+
+/** Raw, unvalidated — the caller decides whether it is usable (see lib/journal.ts). */
+export async function readJournal(): Promise<unknown> {
+  if (!hasChrome() || !chrome.storage) return null;
+  try {
+    const r: any = await chrome.storage.local.get(JOURNAL_KEY);
+    return r[JOURNAL_KEY] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Only ever called after the canonical write succeeded. Dropping the journal on a failed write
+ * would discard the one copy of the edit at the exact moment it is the only copy.
+ */
+export async function clearJournal(): Promise<void> {
+  if (!hasChrome() || !chrome.storage) return;
+  try {
+
+    await chrome.storage.local.remove(JOURNAL_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+// Reading chrome.runtime.lastError inside the callback swallows the benign
+// "The message port closed before a response was received" console warning that
+// fires when a receiver replies late or not at all (e.g. offscreen still waking).
+export function toOffscreen(type: string, extra: Record<string, unknown> = {}, cb?: (r: any) => void) {
+  if (!hasChrome()) return;
+  const msg = { target: 'offscreen', type, ...extra } as any;
+  if (cb) {
+    chrome.runtime.sendMessage(msg, (resp: any) => {
+      void chrome.runtime.lastError;
+      cb(resp);
+    });
+  } else {
+    chrome.runtime.sendMessage(msg).catch(() => {});
+  }
+}
+
+export function toBackground(type: string, extra: Record<string, unknown> = {}, cb?: (r: any) => void) {
+  if (!hasChrome()) return;
+  const msg = { target: 'bg', type, ...extra };
+  if (cb) {
+    chrome.runtime.sendMessage(msg, (resp: any) => {
+      void chrome.runtime.lastError;
+      cb(resp);
+    });
+  } else {
+    chrome.runtime.sendMessage(msg).catch(() => {});
+  }
+}
+
+// Trailing-edge throttle for live-drag messages (don't flood the offscreen page).
+export function makeThrottle(intervalMs: number) {
+  let last = 0;
+  let trailing: ReturnType<typeof setTimeout> | null = null;
+  const run = (fn: () => void) => {
+    const now = performance.now();
+    if (trailing) clearTimeout(trailing);
+    if (now - last >= intervalMs) {
+      last = now;
+      fn();
+    } else {
+      trailing = setTimeout(() => {
+        trailing = null;
+        last = performance.now();
+        fn();
+      }, intervalMs - (now - last));
+    }
+  };
+  run.cancel = () => {
+    if (trailing) clearTimeout(trailing);
+    trailing = null;
+  };
+  return run;
+}
+
+
+export interface InitialState {
+  bands: Band[];
+  gain: number;
+  presets: Record<string, PresetBands>;
+  activePreset: string;
+  readable: boolean;
+}
+
+// Read saved presets (sync) so the popup can paint them immediately. The active
+// tab's live curve comes from the engine broadcast, so bands/gain start flat here.
+export async function readInitialState(): Promise<InitialState> {
+  const presets: Record<string, PresetBands> = {};
+  const base = { bands: flatBands(), gain: 1, activePreset: '' };
+  if (!hasChrome() || !chrome.storage) return { ...base, presets, readable: false };
+  try {
+    const all: any = await chrome.storage.sync.get(null);
+    for (const k in all) {
+      if (!k.startsWith(PRESET_PREFIX)) continue;
+      const name = k.slice(PRESET_PREFIX.length);
+      if (UNSAFE_KEYS.includes(name)) continue;
+      presets[name] = coerceBands(all[k]) ?? all[k]; // sanitize legacy/foreign shapes for first paint
+    }
+  } catch {
+    return { ...base, presets, readable: false };
+  }
+  return { ...base, presets, readable: true };
+}
+
+// Read presets from sync storage, self-healing legacy/out-of-range values.
+export async function refreshPresets(): Promise<Record<string, PresetBands>> {
+  const result = await refreshPresetsResult();
+  return result.ok ? result.presets : {};
+}
+
+export async function refreshPresetsResult(): Promise<{ ok: true; presets: Record<string, PresetBands> } | { ok: false }> {
+  const presets: Record<string, PresetBands> = {};
+  if (!hasChrome() || !chrome.storage) return { ok: false };
+  try {
+    const all: any = await chrome.storage.sync.get(null);
+    const heal: Record<string, PresetBands> = {};
+    for (const k in all) {
+      if (!k.startsWith(PRESET_PREFIX)) continue;
+      const name = k.slice(PRESET_PREFIX.length);
+      if (UNSAFE_KEYS.includes(name)) continue;
+      const raw = all[k];
+      const clean = coerceBands(raw);
+      if (clean) {
+        presets[name] = clean;
+        if (!presetBandsEqual(clean, raw)) heal[k] = clean;
+      } else {
+        presets[name] = raw;
+      }
+    }
+    if (Object.keys(heal).length) {
+      try {
+        await chrome.storage.sync.set(heal);
+      } catch {
+        /* heal is best-effort */
+      }
+    }
+  } catch {
+    return { ok: false };
+  }
+  return { ok: true, presets };
+}
+
+export async function savePreset(name: string, bands: Band[]) {
+  const preset = { frequencies: bands.map((b) => b.frequency), gains: bands.map((b) => b.gain), qs: bands.map((b) => b.q) };
+  await chrome.storage.sync.set({ [PRESET_PREFIX + name]: preset });
+}
+
+export async function deletePreset(name: string) {
+  await chrome.storage.sync.remove(PRESET_PREFIX + name);
+}
+
+/**
+ * Is the list this document holds known to have come from storage?
+ *
+ * A write replaces the whole RULES array, so one assembled from a list we could not read would
+ * delete every rule we failed to see. That is not hypothetical. During the 2.5 smoke a single
+ * rejected `sync.get` emptied the list, the popup showed "no rules", the next save persisted the
+ * empty array, and a rule was gone — silently, with no error anywhere on the way.
+ *
+ * It is deliberately NOT a latch. A first draft set it once and never cleared it, which left a
+ * second, quieter version of the same bug: boot reads fine, another window adds a rule, our
+ * refresh read then fails, and the list we still hold is no longer what is stored — but the flag
+ * says it is, so the next save writes our stale array over the rule we never saw. Cleared on every
+ * failure, this answers the only question a whole-array replace may be built on: does what I have
+ * reflect what is there?
+ *
+ * Per document, which is the right scope: each one reads for itself.
+ */
+let rulesRead = false;
+
+/**
+ * Domain rules live in one sync array key so ordering (first-match-wins) is preserved.
+ *
+ * `[]` means the read succeeded and there are none. `null` means it did not succeed, and callers
+ * must not turn that back into `[]` — the distinction is the whole point. See readWorld, which
+ * exists for the same reason on the other side of this module.
+ */
+export async function readRules(): Promise<Rule[] | null> {
+  if (!hasChrome() || !chrome.storage) {
+    rulesRead = false;
+    return null;
+  }
+  try {
+    const r: any = await chrome.storage.sync.get(RULES_KEY);
+    rulesRead = true;
+    return Array.isArray(r[RULES_KEY]) ? r[RULES_KEY] : [];
+  } catch {
+    rulesRead = false; // what we hold is no longer known to match storage
+    return null;
+  }
+}
+
+export async function writeRules(rules: Rule[]): Promise<boolean> {
+  return (await writeRulesResult(rules)).ok;
+}
+
+/** Same write, with the reason when it fails — sync enforces both a per-minute and an hourly cap. */
+export async function writeRulesResult(rules: Rule[]): Promise<PersistResult> {
+  if (!hasChrome() || !chrome.storage) return { ok: false, error: 'no storage' };
+  // Refuse before we can delete something we never saw. The caller reports this the same way it
+  // reports a quota refusal, which is what makes the failure visible instead of destructive.
+  if (!rulesRead) return { ok: false, error: 'rules not read' };
+  try {
+    // Round the curves here and only here. sync allows 8192 bytes for this one item and a fully
+    // dragged rule is 702 of them unrounded, so the array stops fitting at eleven saved sites.
+    // See quantize.ts for why the write is the only place this is allowed to happen.
+    await chrome.storage.sync.set({ [RULES_KEY]: quantizeRules(rules) });
+
+    return { ok: true };
+  } catch (e) {
+    return persistFailed(e); // typically the sync write quota
+  }
+}
+
+// Sanitize rules from an untrusted share code before they touch storage/matching:
+// coerce every pattern to a clean string (a non-string pattern would throw in
+// matchRule and white-screen the popup), validate curve payloads via coerceBands,
+// require a real preset name for preset rules, mint fresh ids, drop everything else.
+export function sanitizeImportedRules(raw: unknown): Rule[] {
+  if (!Array.isArray(raw)) return [];
+  const out: Rule[] = [];
+  for (const r of raw as any[]) {
+    if (!r || (r.mode !== 'preset' && r.mode !== 'curve') || !Array.isArray(r.patterns)) continue;
+    const patterns = parsePatterns(r.patterns.join(' '));
+    if (!patterns.length) continue;
+    if (r.mode === 'curve') {
+      const curve = coerceBands(r.curve);
+      if (!curve) continue;
+      out.push({
+        id: newRuleId(),
+        patterns,
+        mode: 'curve',
+        curve,
+        gain: clampMasterGain(r.gain ?? 1),
+        preset: typeof r.preset === 'string' ? r.preset : '',
+        enabled: r.enabled !== false
+      });
+    } else {
+      if (typeof r.preset !== 'string' || !r.preset) continue;
+      out.push({ id: newRuleId(), patterns, mode: 'preset', preset: r.preset, enabled: r.enabled !== false });
+    }
+  }
+  return out;
+}
+
+// Share codes — a self-contained, offline base64 string (no server/link) that bundles
+// presets and/or rules. UTF-8 safe.
+const SHARE_PREFIX = 'UMBRA1:';
+export interface SharePayload {
+  presets?: Record<string, PresetBands>;
+  rules?: Rule[];
+}
+
+/** Include user-defined dependencies, including overrides of built-in preset names. */
+export function rulesSharePayload(rules: Rule[], presets: Record<string, PresetBands>): SharePayload {
+  const referenced: Record<string, PresetBands> = Object.create(null);
+  for (const rule of rules) {
+    const name = rule.mode === 'preset' ? rule.preset : '';
+    if (!name || UNSAFE_KEYS.includes(name) || !Object.prototype.hasOwnProperty.call(presets, name)) continue;
+    const bands = coerceBands(presets[name]);
+    if (bands) referenced[name] = bands;
+  }
+  return Object.keys(referenced).length ? { rules, presets: referenced } : { rules };
+}
+function b64encode(str: string): string {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  bytes.forEach((b) => (bin += String.fromCharCode(b)));
+  return btoa(bin);
+}
+function b64decode(b64: string): string {
+  const bin = atob(b64);
+  return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+}
+export function encodeShare(payload: SharePayload): string {
+  return SHARE_PREFIX + b64encode(JSON.stringify(payload));
+}
+export function decodeShare(code: string): SharePayload | null {
+  const s = (code || '').trim();
+  const body = s.startsWith(SHARE_PREFIX) ? s.slice(SHARE_PREFIX.length) : s;
+  if (body.length > 64 * 1024) return null; // reject oversized blobs before decode/parse (sync-quota / DoS guard)
+  try {
+    const obj = JSON.parse(b64decode(body));
+    if (obj && typeof obj === 'object') return obj as SharePayload;
+  } catch {
+    /* not a valid code */
+  }
+  return null;
+}
+
+export async function importPresetsText(text: string): Promise<{ count: number; error?: string }> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { count: 0, error: 'not a valid JSON file' };
+  }
+  const presets = normalizePresets(parsed);
+  const names = Object.keys(presets);
+  if (!names.length) return { count: 0, error: 'no compatible presets in that file' };
+  const toSet: Record<string, PresetBands> = {};
+  for (const n of names) toSet[PRESET_PREFIX + n] = presets[n];
+  try {
+    await chrome.storage.sync.set(toSet);
+  } catch {
+    return { count: 0, error: 'save failed (storage full?)' };
+  }
+  return { count: names.length };
+}
+
+export function bandsToPreset(bands: Band[]): PresetBands {
+  return { frequencies: bands.map((b) => b.frequency), gains: bands.map((b) => b.gain), qs: bands.map((b) => b.q) };
+}

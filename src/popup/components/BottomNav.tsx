@@ -1,0 +1,76 @@
+import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { AudioLines, SlidersHorizontal, ListFilter, AppWindow, MoreHorizontal } from 'lucide-react';
+import { useT } from '../i18n';
+
+export type ViewId = 'eq' | 'presets' | 'rules' | 'tabs' | 'more';
+
+const TABS: { id: ViewId; Icon: typeof AudioLines }[] = [
+  { id: 'eq', Icon: AudioLines },
+  { id: 'presets', Icon: SlidersHorizontal },
+  { id: 'rules', Icon: ListFilter },
+  { id: 'tabs', Icon: AppWindow },
+  { id: 'more', Icon: MoreHorizontal }
+];
+
+// Bottom tab bar with a sliding active indicator (smoothui "animated tabs" idea).
+function BottomNavImpl({ view, onView }: { view: ViewId; onView: (v: ViewId) => void }) {
+  const tr = useT();
+  const ref = useRef<HTMLDivElement>(null);
+  const [pill, setPill] = useState({ cx: 0 });
+  const [animate, setAnimate] = useState(false);
+
+  // Position the indicator BEFORE paint so it starts under the active tab (not sliding in from x=0).
+  useLayoutEffect(() => {
+    const update = () => {
+      const el = ref.current?.querySelector<HTMLElement>(`[data-tab="${view}"]`);
+      if (el) setPill({ cx: el.offsetLeft + el.offsetWidth / 2 });
+    };
+    update();
+    if (!ref.current || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(update);
+    observer.observe(ref.current);
+    return () => observer.disconnect();
+  }, [view]);
+  // Enable the slide only after the first paint, so switching tabs animates but mount doesn't.
+  useEffect(() => {
+    const r = requestAnimationFrame(() => setAnimate(true));
+    return () => cancelAnimationFrame(r);
+  }, []);
+
+  return (
+    <nav ref={ref} aria-label={tr('nav.label')} className="relative flex shrink-0 overflow-hidden border-t border-white/10 backdrop-blur-md" style={{ background: 'rgba(255,255,255,.04)' }}>
+      {/* A resize can leave the old indicator position for a frame; contain it inside the bar. */}
+      <span
+        aria-hidden
+        className={
+          'absolute top-0 h-0.5 rounded bg-accent/80 ' +
+          (animate ? 'transition-[left] duration-300 [transition-timing-function:cubic-bezier(.22,1,.36,1)]' : '')
+        }
+        style={{ left: pill.cx - 13, width: 26 }}
+      />
+      {TABS.map((tab) => {
+        const on = view === tab.id;
+        return (
+          <button
+            type="button"
+            key={tab.id}
+            data-tab={tab.id}
+            onClick={() => onView(tab.id)}
+            aria-current={on ? 'page' : undefined}
+            className={
+              'flex flex-1 flex-col items-center gap-1 py-2 text-[11px] font-semibold transition-[color,scale] duration-150 ease-out active:scale-[0.96] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent ' +
+              (on ? 'text-accent' : 'text-muted-foreground hover:text-foreground')
+            }
+          >
+            <tab.Icon className="size-5" aria-hidden="true" />
+            {tr('nav.' + tab.id)}
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+
+// Memoized so a band-drag re-render of the parent (once per frame) skips this bar; `view` is a
+// primitive and `onView` is a stable setter, so the shallow prop comparison holds.
+export const BottomNav = memo(BottomNavImpl);

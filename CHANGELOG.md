@@ -1,0 +1,323 @@
+# Changelog
+
+All notable changes to Umbra EQ are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
+[semantic versioning](https://semver.org/).
+
+## [Unreleased]
+
+## [2.5.0] — 2026-11-08
+
+Prepared release candidate. Chrome Web Store publication is tracked separately in
+[PROJECT.md](PROJECT.md); this entry does not mean store review has completed.
+
+### Added
+
+- **Exact band editing:** select a graph point, then type its frequency and gain below
+  the graph. Peaking bands also expose Q; shelf filters do not use it. Enter commits,
+  Escape restores the field, and keyboard navigation does not alter untouched values.
+- **Shared output limiter:** a stereo-linked AudioWorklet limits the sum of captured
+  tabs at a −1 dBFS sample-peak ceiling with 5 ms lookahead. It is not a true-peak
+  limiter and cannot repair distortion already present in the source recording.
+- **Output peak meter:** shows the common stereo output after limiting, with a held
+  peak marker. The spectrum continues to show the selected tab.
+- **Auto Gain:** optional compensation estimated from the EQ settings, off by default.
+  It leaves stored master volume unchanged. It does not measure track loudness,
+  guarantee matched listening levels or normalize volume between videos.
+- **Reset changes:** restore the sound from when the editor opened. Destructive profile
+  reset stays under More, requires confirmation and offers Undo.
+- **Save for this site / Update:** create or update a site rule from the current sound
+  while preserving the global profile and existing rule metadata.
+- **Capture shortcut:** toggle the active tab's EQ without opening the popup. Assign a
+  combination at `chrome://extensions/shortcuts`; no default binding is imposed.
+- **English/Russian store metadata:** bundled manifest locales, ready-to-paste descriptions,
+  permission explanations and an asset brief in [docs/store](docs/store/README.md).
+  Dashboard descriptions and store submission remain separate publication steps.
+
+### Changed
+
+- Retained the original compact interface: master volume on the left, colored round
+  graph points, lower navigation and a 620 × 580 px popup. The full-window editor
+  keeps its centered instrument layout. See [the current UI](docs/DESIGN.md).
+- Improved small text, focus visibility, preset remove targets, selected-theme semantics
+  and reduced-motion behavior. The Guide traps focus, makes the background inert and
+  restores focus on close. Menus support keyboard navigation and focus restoration.
+- Kept the original onboarding composition with clearer privacy text, complete EN/RU
+  labels, narrow-screen fixes and a static response drawn from a real preset.
+- Bypass keeps the curve editable while the tab plays without EQ. Sound edits remain
+  a draft until Bypass ends. Capture-state messages explain unavailable or failed capture.
+- Privacy and product copy distinguish local audio from presets/rules that can use Chrome
+  Sync, and describe site/protected-media limitations without universal compatibility claims.
+- Updated build/test dependencies and the CI runtime to Node 24. Release packaging includes
+  application and production dependency licenses and rejects development/debug artifacts.
+  Temporary popup recording instrumentation was removed; no production dependencies were added.
+
+### Fixed
+
+- Corrected master volume to amplitude decibels (`20 log10`), labelled −50 to +20 dB.
+  Stored linear gains retain their sound. Auto Gain uses the corrected units and no longer
+  compensates a bypassed curve during a master-volume drag.
+- Corrected plotted biquad responses to match Web Audio bell and shelf filters. Shelf Q
+  controls are disabled. Pointer coordinates scale with the rendered graph; labels remain
+  readable and selected-band highlighting survives focus moving into the fields.
+- Serialized offscreen recovery, surfaced fatal audio-processor failures and rejected stale
+  Stop/capture-error completions. Saved rules, the global profile and Auto Gain preference
+  are resolved before shortcut-started capture; stopped tabs remain stopped after reopening.
+  Navigation invalidates stale captures instead of carrying the previous site's sound forward.
+- Protected newer edits from old journal/save callbacks. Bypass and Reset cancel conflicting
+  pending work; the latest gesture is retained if the popup closes before its animation frame.
+  Recovery and reset preserve preset provenance, including the “Based on” label.
+- Prevented popup/full-window storage changes from overwriting newer sound. Rule and preset
+  changes from another window apply to running audio without interrupting a live edit.
+- Failed storage reads preserve the last known sound and block writes until Retry reloads a
+  complete state. Site-save and Undo briefly lock conflicting edits; Reset/Undo verify storage
+  writes and reject stale or duplicate restores. Undo appears only with the operation that armed it.
+- Preset deletion and shared import report confirmed or partial results. Shared rules include
+  referenced presets; failed dependencies cannot create rules pointing at missing presets.
+  Rounded persisted curve values reduce synced-rule storage use without changing live editing.
+- Hidden built-in presets remain recoverable when the list is empty. Long names no longer
+  push Save/Update buttons or rule selectors outside the panel. The lower navigation indicator
+  stays contained during resize, including a 320 px full-window editor.
+- Corrected document language, graph heading, main landmark and rule listbox names.
+
+## [2.4.1] — 2026-07-29
+
+### Changed
+
+- **Store title leads with the keyword** — the extension name is now
+  "Equalizer + Bass Boost, per Tab — Umbra EQ" (was "Umbra EQ — Equalizer & Bass Boost"), so the
+  Chrome Web Store's search-weighted title starts with the terms people actually search for, while
+  keeping the Umbra EQ brand as a suffix. No functional change.
+
+## [2.4.0] — 2026-07-29
+
+### Changed
+
+- **Band guide** — the guide printed a zone label under every one of the 11 dots, so it read
+  "Bass Bass Bass Mids Mids Mids Mids…" and the words collided at the low end where the bands sit
+  close together. It now renders one centered label per frequency zone (BASS / MIDS / TREBLE /
+  AIR). The header toggle icon changed from `Tags` to `Captions`.
+- **Onboarding rebuilt** — the welcome page now leads with a live mockup of the popup (real
+  header, band guide, EQ curve, animated FFT spectrum, bottom nav). The pin-the-extension
+  animation is now pure CSS (toolbar → extensions menu → cursor → pin) with a reduced-motion
+  static fallback, replacing a baked WebP.
+- **Higher-contrast UI text** — the bottom-navigation labels and helper / empty-state text now
+  meet WCAG AA contrast.
+
+### Added
+
+- **Engine health warning** — if the popup and the audio engine ever fall out of sync, the popup
+  now shows a clear "reload the extension" banner instead of silently misbehaving.
+
+### Fixed
+
+- A just-finished band edit could briefly revert (and be saved reverted) when another tab started
+  or stopped playing.
+- Stopping a tab from the **Tabs** list is now remembered, so it isn't automatically re-EQ'd the
+  next time you open the popup.
+- Keyboard focus no longer jumps to the top of the popup after you close a dropdown or the in-app
+  guide; read-only equalizer controls now announce their disabled state to screen readers.
+- A corrupt or foreign saved preset can no longer break the equalizer.
+- A site rule set to a preset could briefly play flat right after the popup opened (until you
+  switched views or toggled it), if the rule's preset was still loading — the popup now
+  re-applies once presets and rules have loaded.
+
+### Security
+
+- The **Tabs** list no longer loads site icons over the network: favicons render only from local
+  data, and the extension's content-security policy now blocks any remote image or connection —
+  keeping the "100% local, no network" guarantee airtight.
+
+### Performance
+
+- The live spectrum stops polling the audio engine when the equalizer view isn't visible (saves
+  CPU / battery, most noticeably in the full-window editor).
+
+### Removed
+
+- `public/onboarding-pin.webp` and `public/onboarding-pin-static.webp` — no longer referenced
+  after the onboarding rebuild.
+
+## [2.3.0] — 2026-07-11
+
+Two rounds of a production audit (specialized sub-agents, adversarially verified) drove a
+hardening pass; the second round caught and fixed regressions the first round's fixes introduced.
+
+### Added
+- **Keyboard control for the equalizer** — the master fader and every band dot are now focusable
+  sliders: arrow keys move gain/frequency, Shift+arrow changes Q, PageUp/Down and Home/End on the
+  fader, Enter/Delete resets a band. Proper `role="slider"` + live value semantics for screen readers.
+- **Rebuilt onboarding** — a pin-the-extension guide with an arrow to the toolbar and a baked,
+  self-contained animation of the extensions-menu pin flow (no external assets); reduced-motion aware.
+
+### Changed
+- **Rules: a "Custom sound" rule can be switched to a preset** (and back) — it used to be a dead end.
+- **Build:** `@crxjs/vite-plugin` moved off the deprecated beta to the stable line (2.7.x).
+- Volume and EQ dragging, and the spectrum FFT, do less work per frame (coalesced updates, lighter
+  FFT payload), and the spectrum poll no longer re-renders the whole popup.
+
+### Fixed
+- A **Stopped** tab is no longer silently re-equalized after the service worker is evicted
+  (the Stopped set now persists in `chrome.storage.session`).
+- **Tab-capture streams no longer leak** on init failure, mid-capture disconnect, or a chain error.
+- Holding a key to nudge a band/volume no longer risks blowing the sync-storage write quota and
+  silently dropping the final save (commits are debounced).
+- A rule pattern edited in one window is no longer overwritten by a stale edit in another; the
+  pattern field also commits on Enter and shows the normalized value.
+- Opera/other internal pages (`opera://`, `view-source:`, `chrome-untrusted://`) are correctly
+  treated as not-capturable; a health-checking ping no longer tears down live captures during a slow
+  engine start; an imported rule with a preset named like `__proto__` can no longer crash resolution.
+- The **toolbar badge** shows the live capture count again (it read a stale field and was always empty).
+- The top band (20.48 kHz) is no longer clamped down, so a flat preset round-trips cleanly.
+- The themed dropdowns are keyboard-navigable and the in-app guide is a proper focus-trapped dialog;
+  action toasts are announced to screen readers.
+
+## [2.2.0] — 2026-07-08
+
+Umbra now works like one sound system: a single EQ plays on **every** tab, and rules override
+it for the sites you choose. This replaces the old per-site "sticky EQ" memory — you just edit
+what you hear, and it goes to the right place.
+
+### Added
+- **One global sound on every tab** — set the EQ once and it plays everywhere. On a site with
+  a rule you edit that rule; everywhere else you edit the global sound.
+- **Built-in presets** — **Bass Boost**, **Vocal**, **Movie**, and **Warm** ship in the Presets
+  tab, so there's a good sound with zero setup. Dismiss one with ×; bring them back with
+  **Restore built-ins**.
+- **Full window is now a global-sound editor** — open it to shape the sound-everywhere profile
+  on a bigger graph; changes apply to every tab you have EQ on.
+- **Band guide** — a toggle next to Spectrum labels each dot's zone (Bass / Mids / Treble /
+  Air) so it's clear what you're dragging.
+- **Active preset** is shown in the EQ header.
+- **Output limiter** — an automatic brick-wall limiter on each tab keeps big boosts loud but
+  clean instead of clipping into crackle.
+
+### Changed
+- **Rules and the global sound take effect live** — change one and every EQ'd tab updates right
+  away, instead of only on the next capture.
+- **www sites** — `www.youtube.com` and `youtube.com` count as the same site, so a rule made on
+  a `www.` tab actually matches it (two of the three quick-add scopes used to miss).
+- **Bass Boost** is louder and cleaner — low shelf moved to 90 Hz (was 340 Hz).
+- **Share-code import** is hardened: patterns coerced to text, curves validated, malformed
+  rules dropped — a bad pasted code can't break the popup.
+- Rule ids now use `crypto.randomUUID()` (no same-millisecond id collisions).
+
+### Removed
+- **Per-site "sticky EQ" memory** and the **Remember EQ per site** toggle — replaced by the
+  global sound + rules. (Any old saved data is left in place, unused.)
+- The **Default sound** card and the **Remembered sites** list in **More**.
+
+### Fixed
+- **Applying a preset** changes the sound immediately (it used to update the graph but leave
+  the audio flat until you nudged a band by hand).
+- **Save preset** — a just-saved preset no longer occasionally vanished from the list.
+- **Full window** opens as a centered, framed panel and no longer jumps when you switch views.
+
+### Internal
+- The audio engine is now a thin applier: the popup resolves each tab's sound (rule → global →
+  flat) and pushes it, so all rule/preset logic lives in one place. Removed the dead per-site
+  memory + in-engine resolver code. `npm run typecheck` runs in CI; share-code round-trip tests.
+
+## [2.1.0] — 2026-07-06
+
+### Added
+- **Per-tab EQ** — the audio engine now builds an independent filter chain for every
+  captured tab, so two tabs (e.g. a film tab and a music tab) can hold two different EQ
+  curves at the same time. The popup edits whichever tab is currently active.
+- **Per-site memory (sticky EQ)** — a tab's shaped curve is remembered under its
+  hostname and, while **Remember EQ per site** is on, re-applied automatically the next
+  time that site's tab is captured. Manage or forget saved sites in **More → Remembered
+  sites**; the popup previews a site's saved curve before you even press EQ This Tab.
+- **Domain rules** — a pattern language assigns a preset or a saved curve to sites by
+  hostname pattern: `youtube.` (name + any TLD), `.youtube.` (subdomains + any TLD),
+  `.youtube.com` (any subdomain, fixed TLD), exact hosts, and multi-pattern rules
+  (`film. / kino.`) that group several sites under one preset. First matching rule wins;
+  a hand-tweaked site always overrides its rule. Managed in a new **Rules** tab with an
+  inline guide and a one-click "rule for this site". Rules sync across the user's
+  browsers. Matcher is unit-tested (14 cases); multi-part TLDs (.co.uk) match
+  approximately (no public-suffix list).
+- **Russian & English UI** — full RU/EN localization with an in-app **Language** switch
+  (More → Language), defaulting to the browser language. The Rules guide is written in
+  plain, jargon-free language (no "TLD"/"hostname" wording).
+- **Custom accent color** — a hue slider (More → Theme → Custom) alongside the four
+  presets. It's a hue picker, not raw RGB: the accent is derived at fixed OKLCH
+  lightness/chroma, so any color stays readable and equally bright.
+- **In-app Guide** — a detailed, translated "How to use" overlay (More → Guide) covering
+  the graph, volume, spectrum, presets, rules, per-tab EQ, and privacy.
+- **Share by code** — Copy code / Paste code (Presets and Rules) exchange presets and/or
+  rules as a self-contained offline base64 string — no server, no link.
+- **Reset scope** — **Reset** (EQ view) flattens the current tab and forgets its saved
+  curve; each row in **Tabs** has its own **Reset**; **Clear all** (More) flattens every
+  live tab and wipes all remembered sites.
+
+### Changed
+- Native `<select>` dropdowns replaced with a themed glass dropdown that matches the dark
+  UI (the browser-gray popup couldn't be styled).
+- Popup housekeeping: the Spectrum toggle is now an icon-only button; the "Remember EQ
+  per site" switch moved from More to the Rules tab; the Remembered-sites list and the
+  engine-status footer were removed; Full window is a compact button; the EQ view is
+  non-selectable so text can't be highlighted by accident.
+- The EQ graph and volume fader are read-only until the active tab is captured (dots and
+  handle dim) — edits target a live per-tab chain.
+- Live-drag no longer triggers a full status broadcast, and per-domain writes are
+  debounced (250 ms, flushed on stop), cutting messaging + storage churn during drags.
+- Service worker reports the active tab (id + hostname) to the popup; capture now carries
+  the tab URL so the engine can key per-domain memory.
+
+## [2.0.0] — 2026-07-06
+
+Major release: the popup is rebuilt as a React + TypeScript app (Vite + CRXJS,
+Tailwind + shadcn/ui) with a dark frosted-glass interface, a horizontal-per-bin
+"Ears-style" spectrum, a thin vertical volume fader, and a bottom-tab layout. The
+audio engine (service worker + offscreen Web Audio) is unchanged. Load the **`dist/`**
+folder unpacked.
+
+### Highlights
+- Bottom-nav app (EQ / Presets / Tabs / More); glass volume fader with a 0 dB detent;
+  high-resolution spectrum (per-bin, 60fps, silence-safe); refined glass theme + 4
+  color themes; onboarding page restyled to match.
+
+### Changed
+- **Popup migrated to React + TypeScript** (Vite + CRXJS, Tailwind + shadcn/ui). The
+  audio engine stays vanilla (service worker + offscreen Web Audio). Pure audio/preset
+  math moved to `src/lib` and unit-tested with Vitest; the EQ graph is plain React SVG
+  (Snap.svg dropped). Build → `dist/`; package via `build-zip.ps1` → `release/` zip.
+  Load the **`dist/`** folder unpacked. Old flat-file vanilla popup + browser test
+  harnesses removed on this build.
+- **New bottom-nav app UI** — `popup.html`, `popup.css`, and the popup's view wiring
+  rewritten from scratch. The single-screen layout is replaced by four full views
+  (EQ / Presets / Tabs / More) switched by a bottom tab bar; the old chip-overlays and
+  preset drawer are gone. Styled as a **dark frosted-glass** interface: muted,
+  low-saturation accents (no neon), a cool near-black ground with soft radial depth,
+  and backdrop-blur panels (kept off every EQ-graph ancestor so drag hit-testing still
+  works). The four color themes (Eclipse/Nocturne/Aurora/Solar) recolor the graph +
+  accent, all muted. The audio engine is untouched and all 53 tests still pass. Views
+  toggle by display/opacity only — never transform — so drag keeps working.
+- `test/visual-harness.html` updated to the new markup.
+
+### Added
+- **Clearer master-volume strip** — a recessed rounded track, a level fill that shows
+  deviation from unity (accent above 0 dB, dim below), a chunky grabbable handle, and a
+  live signed dB readout (e.g. "+4"). Widened for easier grabbing.
+- **More readable EQ graph** — axis labels use the readable text color (were dark-on-dark),
+  a dashed 0 dB baseline marks the boost/cut reference, and band dots are larger.
+- MIT license; project open-sourced.
+- Multi-store packaging guidance for Chrome, Edge, and Opera (single Chromium zip).
+- GitHub scaffolding: CI build-on-tag, issue templates, contributing guide.
+- `FIREFOX_PORT.md` documenting the planned Firefox content-script engine.
+
+## [1.0.1] — 2026-07-06
+
+Initial public release candidate.
+
+### Added
+- 11-band parametric EQ with a draggable combined response curve (freq × gain,
+  Shift-drag = Q, double-click = reset a band).
+- Bass boost preset and master volume up to +10 dB.
+- Named presets with export/import (JSON) and `storage.sync` across the user's browser.
+- Live spectrum overlay (visual only).
+- Four themes (Eclipse, Nocturne, Aurora, Solar) with a custom themed dropdown.
+- Guide and Active-tabs overlays, onboarding page, full-window mode.
+- Manifest V3 architecture: service worker + offscreen Web Audio engine, click-free
+  parameter glides, boot-restore with a `pendingRestore` guard.
+- Prototype-pollution hardening on all preset read/write paths.
